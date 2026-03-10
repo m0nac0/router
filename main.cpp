@@ -229,9 +229,7 @@ int main()
         const AbsTime departureTime = midnight + local_tm.tm_hour * 3600u + local_tm.tm_min * 60u + local_tm.tm_sec;
 
         std::cout << "Finding route from " << feed.stopName(fromStop)
-                  << " (" << static_cast<uint32_t>(fromStop) << ")"
                   << " to " << feed.stopName(toStop)
-                  << " (" << static_cast<uint32_t>(toStop) << ")"
                   << " departing at current time.\n";
 
         const RouteResult &result = getRoute(fromStop, toStop, departureTime,

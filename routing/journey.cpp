@@ -1,11 +1,17 @@
 #include "journey.hpp"
 
+#include <algorithm>
 #include <format>
 #include <iostream>
 
 std::string fmtTime(AbsTime t)
 {
     return std::format("{:%Y-%m-%d %H:%M}", std::chrono::sys_seconds{std::chrono::seconds{t}});
+}
+
+static std::string fmtAbsHhmm(AbsTime t)
+{
+    return std::format("{:%H:%M}", std::chrono::sys_seconds{std::chrono::seconds{t}});
 }
 
 std::string fmtHhmm(Time t)
@@ -16,11 +22,13 @@ std::string fmtHhmm(Time t)
 std::string fmtDelay(int32_t s)
 {
     if (s == 0)
-        return "on time";
+        return "(on time)";
     const char *sign = s > 0 ? "+" : "-";
     s = std::abs(s);
-    return s < 60 ? std::format("{}{}s", sign, s)
-                  : std::format("{}{}m{}s", sign, s / 60, s % 60);
+    std::string inner = s < 60  ? std::format("{}{}s", sign, s)
+                      : s % 60  ? std::format("{}{}m{}s", sign, s / 60, s % 60)
+                                : std::format("{}{}m", sign, s / 60);
+    return '(' + inner + ')';
 }
 
 RouteResult getRoute(StationId fromStop, StationId toStop, AbsTime departureTime,
@@ -166,43 +174,58 @@ RouteResult getRoute(StationId fromStop, StationId toStop, AbsTime departureTime
 
 void printRoute(const RouteResult &route, const Feed &feed)
 {
+    if (route.empty())
+        return;
+
+    const unsigned totalMin = (route.back().arrivalTime - route.front().departureTime) / 60;
+    std::cout << '\n'
+              << feed.stopName(route.front().departureStop) << " \u2192 "
+              << feed.stopName(route.back().arrivalStop)
+              << "  (" << totalMin << " min)\n";
+
     for (const Leg &leg : route)
     {
+        std::cout << '\n';
         if (leg.isWalk)
         {
-            std::cout << "\n[Walk " << (leg.arrivalTime - leg.departureTime) / 60 << " min]\n";
-            std::cout << "  " << feed.stopName(leg.departureStop)
-                      << " -> " << feed.stopName(leg.arrivalStop) << '\n';
+            const unsigned min = (leg.arrivalTime - leg.departureTime) / 60;
+            std::cout << "  \u2195 " << min << " min walk\n";
             continue;
         }
-        std::cout << "\n[" << leg.routeShortName << "] towards " << leg.tripHeadsign << "\n";
 
-        std::cout << "  " << feed.stopName(leg.departureStop)
-                  << " dep " << fmtTime(leg.departureTime);
-        if (leg.departureTimeRealTime != kNoAbsTime)
-            std::cout << " " << fmtDelay(static_cast<int32_t>(leg.departureTimeRealTime)
-                                         - static_cast<int32_t>(leg.departureTime));
-        std::cout << " -> " << feed.stopName(leg.arrivalStop)
-                  << " arr " << fmtTime(leg.arrivalTime);
-        if (leg.arrivalTimeRealTime != kNoAbsTime)
-            std::cout << " " << fmtDelay(static_cast<int32_t>(leg.arrivalTimeRealTime)
-                                         - static_cast<int32_t>(leg.arrivalTime));
-        std::cout << '\n';
+        std::cout << "  [" << leg.routeShortName << "] " << leg.tripHeadsign << '\n';
+
+        // Column width: widest stop name in this leg + 2 padding.
+        std::size_t nameWidth = std::max(feed.stopName(leg.departureStop).size(),
+                                         feed.stopName(leg.arrivalStop).size());
+        for (const auto &s : leg.intermediateStops)
+            if (!s.skipped)
+                nameWidth = std::max(nameWidth, feed.stopName(s.stopId).size());
+        nameWidth += 2;
+
+        auto printStop = [&](std::string_view prefix, const std::string &name, AbsTime scheduled,
+                             AbsTime realtime)
+        {
+            std::cout << std::format("  {} {:<{}} {}", prefix, name, nameWidth,
+                                     fmtAbsHhmm(scheduled));
+            if (realtime != kNoAbsTime)
+                std::cout << ' ' << fmtDelay(static_cast<int32_t>(realtime)
+                                             - static_cast<int32_t>(scheduled));
+            std::cout << '\n';
+        };
+
+        printStop("\u25cf", feed.stopName(leg.departureStop),
+                  leg.departureTime, leg.departureTimeRealTime);
 
         for (const auto &stop : leg.intermediateStops)
         {
-            std::cout << "    Intermediate stop: " << feed.stopName(stop.stopId)
-                      << " arr " << fmtTime(stop.arrivalTime);
-            if (stop.arrivalTimeRealTime != kNoAbsTime)
-                std::cout << " " << fmtDelay(static_cast<int32_t>(stop.arrivalTimeRealTime)
-                                             - static_cast<int32_t>(stop.arrivalTime));
-            std::cout << ", dep " << fmtTime(stop.departureTime);
-            if (stop.departureTimeRealTime != kNoAbsTime)
-                std::cout << " " << fmtDelay(static_cast<int32_t>(stop.departureTimeRealTime)
-                                             - static_cast<int32_t>(stop.departureTime));
             if (stop.skipped)
-                std::cout << " [SKIPPED]";
-            std::cout << '\n';
+                continue;
+            printStop("\u2502", feed.stopName(stop.stopId),
+                      stop.arrivalTime, stop.arrivalTimeRealTime);
         }
+
+        printStop("\u25cf", feed.stopName(leg.arrivalStop),
+                  leg.arrivalTime, leg.arrivalTimeRealTime);
     }
 }
