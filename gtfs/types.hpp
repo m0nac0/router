@@ -12,7 +12,7 @@ using RouteId   = uint32_t;
 using TripId    = uint32_t;
 using ServiceId = uint32_t;
 
-// Raw GTFS stop ID. May be a child platform/quay or a root station.
+// Internal stop ID. May refer to a child platform/quay or a root station.
 // All data below the connection-building layer (StopTime, RealtimeStopTime,
 // Feed internals) uses StopId.
 enum class StopId : uint32_t {};

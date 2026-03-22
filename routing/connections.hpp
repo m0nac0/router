@@ -4,6 +4,7 @@
 #include "realtime/realtime.hpp"
 
 #include <chrono>
+#include <set>
 #include <vector>
 
 // Returns the Unix timestamp (seconds) for midnight UTC of the given date.
@@ -14,12 +15,18 @@ AbsTime midnightUnix(std::chrono::year_month_day ymd);
 struct Connection
 {
     StationId departureStop;
-    AbsTime   departureTime;
+    AbsTime departureTime;
     StationId arrivalStop;
-    AbsTime   arrivalTime;
-    TripId    tripId;
-    uint32_t  departureSequence; // stop_sequence of the departure stop, for realtime lookup
+    AbsTime arrivalTime;
+    TripId tripId;
+    uint32_t departureSequence; // stop_sequence of the departure stop, for realtime lookup
 };
+
+std::unordered_map<ServiceId, std::set<CalendarEntry>> buildServiceIndex(const Feed &feed);
+std::unordered_map<ServiceId, std::set<CalendarDateException>> buildServiceExceptionsIndex(const Feed &feed);
+bool isServiceActive(const std::unordered_map<ServiceId, std::set<CalendarEntry>> &serviceEntries,
+                     const std::unordered_map<ServiceId, std::set<CalendarDateException>> &serviceExceptions,
+                     ServiceId serviceId, const std::chrono::year_month_day &date);
 
 // Expands every active trip within [fromDate, toDate] into Connection records,
 // resolves child stops to their parent station, and returns the list sorted by

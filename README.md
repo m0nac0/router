@@ -1,6 +1,6 @@
 # router
 A simple public transit routing engine written in C++.
-It reads public transit schedules in GTFS format and computes optimal routes between stops, using the Connection Scan Algorithm (CSA).
+It reads public transit schedules in GTFS format and computes optimal routes between stops, using the RAPTOR or Connection Scan (CSA) algorithms.
 
 A focus is on efficiently reading large GTFS datasets, especially the fact that reading large datasets (e.g. nationwide) and filtering them to a specific region does not consume significantly more memory than reading a smaller dataset for that region only.
 
