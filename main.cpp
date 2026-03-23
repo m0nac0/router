@@ -266,15 +266,16 @@ int main()
         std::cout << "Finding route from " << feed.stopName(fromStop)
                   << " to " << feed.stopName(toStop)
                   << " departing at current time"
-                  << " [" << (currentRouter == Router::RAPTOR ? "RAPTOR" : "CSA") << "].\n";
+                  << " [" << (currentRouter == Router::RAPTOR ? "rRAPTOR" : "CSA") << "].\n";
 
         if (currentRouter == Router::RAPTOR)
         {
             buildRaptorDataIfNeeded();
             const Time relDeparture = departureTime - midnight;
-            const std::vector<RouteResult> results = raptor(fromStop, toStop, relDeparture, midnight,
-                                                            *raptorData, feed,
-                                                            rtOverlays ? &*rtOverlays : nullptr);
+            constexpr Time kSearchWindowSeconds = 2 * 3600;
+            const std::vector<RouteResult> results = rangeRaptor(fromStop, toStop, relDeparture, relDeparture + kSearchWindowSeconds,
+                                                                  midnight, *raptorData, feed,
+                                                                  rtOverlays ? &*rtOverlays : nullptr);
             for (const RouteResult &result : results)
                 printRoute(result, feed);
         }

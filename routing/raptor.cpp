@@ -144,15 +144,94 @@ static Time getArrivalTimeAtIndex(TripId tripId, RouteStopIndex index,
     return getResolvedStopTimeAtIndex(tripId, index, feed, overlays).arrival;
 }
 
+static std::set<Time, std::greater<Time>> getDepartureTimesAtStation(StationId stationId, Time departureTimeMin, Time departureTimeMax,
+                                                                     const RaptorData &data, const Feed &feed, const RealtimeOverlays *overlays)
+{
+    std::set<Time, std::greater<Time>> departureTimes;
+    if (!data.stopRoutes.count(stationId))
+        return departureTimes;
+    for (RaptorRouteId routeId : data.stopRoutes.at(stationId))
+    {
+        const std::vector<TripId> &routeTrips = data.routeTrips.at(routeId);
+        const std::vector<StationId> &routeStopsVec = data.routeStops.at(routeId);
+        auto it = std::find(routeStopsVec.begin(), routeStopsVec.end(), stationId);
+        if (it == routeStopsVec.end())
+        {
+            continue;
+        }
+        RouteStopIndex stopIndex = static_cast<RouteStopIndex>(it - routeStopsVec.begin());
+
+        for (const auto tripId : routeTrips)
+        {
+            Time dep = getDepartureTimeAtIndex(tripId, stopIndex, feed, overlays);
+            if (dep != kNoTime && dep >= departureTimeMin && dep <= departureTimeMax)
+                departureTimes.insert(dep);
+        }
+    }
+
+    return departureTimes;
+}
+
+static std::vector<RouteResult> paretoFilter(std::vector<RouteResult> &&results)
+{
+    std::vector<RouteResult> paretoOptimal;
+    for (const auto &result : results)
+    {
+        bool dominated = false;
+        for (const auto &other : results)
+        {
+            if (&result == &other)
+                continue;
+            const bool weaklyDominates = other.back().arrivalTime <= result.back().arrivalTime && other.size() <= result.size() && other.front().departureTime >= result.front().departureTime;
+            const bool strictlyBetter = other.back().arrivalTime < result.back().arrivalTime || other.size() < result.size() || other.front().departureTime > result.front().departureTime;
+            if (weaklyDominates && strictlyBetter)
+            {
+                dominated = true;
+                break;
+            }
+        }
+        if (!dominated)
+            paretoOptimal.push_back(result);
+    }
+    return paretoOptimal;
+}
+
+std::vector<RouteResult> rangeRaptor(StationId origin, StationId target, Time departureTimeMin, Time departureTimeMax, AbsTime midnight,
+                                     const RaptorData &data, const Feed &feed, const RealtimeOverlays *overlays)
+{
+    auto departureTimes = getDepartureTimesAtStation(origin, departureTimeMin, departureTimeMax, data, feed, overlays);
+    std::vector<RouteResult> allResults;
+    std::unordered_map<StationId, Time> earliestArrivalTime[MAX_NUM_ROUNDS + 1];
+
+    for (Time departureTime : departureTimes)
+    {
+        auto routes = raptor(origin, target, departureTime, midnight, data, feed, overlays, earliestArrivalTime);
+        allResults.insert(allResults.end(), routes.begin(), routes.end());
+    }
+    auto results = paretoFilter(std::move(allResults));
+    std::sort(results.begin(), results.end(), [](const RouteResult &a, const RouteResult &b)
+              {
+        if (a.front().departureTime != b.front().departureTime)
+            return a.front().departureTime < b.front().departureTime;
+        if (a.back().arrivalTime != b.back().arrivalTime)
+            return a.back().arrivalTime < b.back().arrivalTime;
+        return a.size() < b.size(); });
+    return results;
+}
+
 // TODO ensure we correctly handle trips that run past midnight
 std::vector<RouteResult> raptor(StationId origin, StationId target, Time departureTime, AbsTime midnight,
-                                const RaptorData &data, const Feed &feed, const RealtimeOverlays *overlays)
+                                const RaptorData &data, const Feed &feed,
+                                const RealtimeOverlays *overlays,
+                                std::unordered_map<StationId, Time> *earliestArrivalTime)
 {
-    constexpr int MAX_NUM_ROUNDS = 8;
     constexpr int DEFAULT_MINIMUM_TRANSFER_TIME = 120; // 2 minutes
-    // Index 0 = initial state, indices 1..MAX_NUM_ROUNDS = rounds 1..8
-    std::unordered_map<StationId, Time> earliestArrivalTime[MAX_NUM_ROUNDS + 1];
-    earliestArrivalTime[0][origin] = departureTime;
+    std::unordered_map<StationId, Time> localEarliestArrivalTime[MAX_NUM_ROUNDS + 1];
+    // Points to the caller-supplied label arrays (rRAPTOR, inherited across runs) or a fresh local one (RAPTOR, per-run)
+    std::unordered_map<StationId, Time> *eat = earliestArrivalTime ? earliestArrivalTime : localEarliestArrivalTime;
+    eat[0][origin] = departureTime;
+    // τ*(p) from the paper: best arrival at each stop across all rounds within this single run.
+    // Can not be inherited from previous rRAPTOR calls
     std::unordered_map<StationId, Time> earliestOverallArrivalTime;
     earliestOverallArrivalTime[origin] = departureTime;
     std::unordered_map<StationId, ParentLabel> parent[MAX_NUM_ROUNDS + 1];
@@ -164,6 +243,11 @@ std::vector<RouteResult> raptor(StationId origin, StationId target, Time departu
 
     for (int i = 1; i <= MAX_NUM_ROUNDS; i++)
     {
+        // First stage for rRAPTOR: propagate round k-1 labels from previous rRAPTOR runs (later departure times)  into round k
+        for (const auto &[stopId, arrivalTime] : eat[i - 1])
+            if (!eat[i].count(stopId) || arrivalTime < eat[i][stopId])
+                eat[i][stopId] = arrivalTime;
+
         // Serves both as a list of marked routes and maps them to the earliest marked stop index
         std::unordered_map<RaptorRouteId, RouteStopIndex> markedRoutesEarliestStopIndex;
         for (StationId markedStop : markedStops)
@@ -202,13 +286,18 @@ std::vector<RouteResult> raptor(StationId origin, StationId target, Time departu
                     // for circular routes where the same station appears multiple times.
                     Time arrivalTime = getArrivalTimeAtIndex(currentTrip, stopIndex, feed, overlays);
                     if (arrivalTime != kNoTime
-                        // local pruning
+                        // Cross-run pruning: eat[i] may hold a label inherited from a previous
+                        // rRAPTOR run (later departure).
+                        && (!eat[i].count(stopId) || arrivalTime < eat[i][stopId])
+                        // Local pruning: skip if this run already reached stopId earlier via
+                        // any round (τ*(p) in the paper, valid within a single departure time's run).
                         && (!earliestOverallArrivalTime.count(stopId) || arrivalTime < earliestOverallArrivalTime[stopId])
-                        // target pruning
+                        // Target pruning: no need to explore stops that can't beat the best
+                        // arrival at the target found so far in this run.
                         && (!earliestOverallArrivalTime.count(target) || arrivalTime < earliestOverallArrivalTime[target]))
                     {
                         earliestOverallArrivalTime[stopId] = arrivalTime;
-                        earliestArrivalTime[i][stopId] = arrivalTime;
+                        eat[i][stopId] = arrivalTime;
                         parent[i][stopId] = ParentLabel{boardStop, currentTrip, stopIndex, boardStopIndex};
                         markedStops.insert(stopId);
                     }
@@ -217,8 +306,8 @@ std::vector<RouteResult> raptor(StationId origin, StationId target, Time departu
                 // Can we board an earlier trip at this stop?
                 // If our arrival from the previous round is at or before the current trip's
                 // departure here, a trip departing earlier might be available.
-                auto prevIt = earliestArrivalTime[i - 1].find(stopId);
-                if (prevIt == earliestArrivalTime[i - 1].end())
+                auto prevIt = eat[i - 1].find(stopId);
+                if (prevIt == eat[i - 1].end())
                     continue;
                 Time prevArrival = prevIt->second;
 
@@ -284,7 +373,7 @@ std::vector<RouteResult> raptor(StationId origin, StationId target, Time departu
             const StopId markedStopId = asStopId(markedStop);
             if (!feed.transferTimes.count(markedStopId))
                 continue;
-            if (!earliestArrivalTime[i].count(markedStop))
+            if (!eat[i].count(markedStop))
                 continue;
 
             for (const auto &[toStopId, transferTimeSeconds] : feed.transferTimes.at(markedStopId))
@@ -292,7 +381,7 @@ std::vector<RouteResult> raptor(StationId origin, StationId target, Time departu
                 const Stop *toStopInfo = feed.stopById(toStopId);
                 StationId toStation = toStopInfo ? toStopInfo->stationId()
                                                  : StationId{static_cast<uint32_t>(toStopId)};
-                Time arrivalTime = earliestArrivalTime[i][markedStop] + transferTimeSeconds;
+                Time arrivalTime = eat[i][markedStop] + transferTimeSeconds;
                 if (arrivalTime != kNoTime
                     // local pruning
                     && (!earliestOverallArrivalTime.count(toStation) || arrivalTime < earliestOverallArrivalTime[toStation])
@@ -300,7 +389,7 @@ std::vector<RouteResult> raptor(StationId origin, StationId target, Time departu
                     && (!earliestOverallArrivalTime.count(target) || arrivalTime < earliestOverallArrivalTime[target]))
                 {
                     earliestOverallArrivalTime[toStation] = arrivalTime;
-                    earliestArrivalTime[i][toStation] = arrivalTime;
+                    eat[i][toStation] = arrivalTime;
                     parent[i][toStation] = ParentLabel{markedStop, kNoTrip, 0, 0};
                     markedStops.insert(toStation);
                 }
@@ -341,8 +430,8 @@ std::vector<RouteResult> raptor(StationId origin, StationId target, Time departu
             {
                 // Transfer leg: source was reached in the same round, don't decrement k
                 leg.isWalk = true;
-                leg.departureTime = midnight + earliestArrivalTime[k][label.stop];
-                leg.arrivalTime = midnight + earliestArrivalTime[k][cur];
+                leg.departureTime = midnight + eat[k][label.stop];
+                leg.arrivalTime = midnight + eat[k][cur];
             }
             else
             {
