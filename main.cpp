@@ -2,6 +2,7 @@
 #include "realtime/realtime.hpp"
 #include "routing/connections.hpp"
 #include "routing/journey.hpp"
+#include "routing/raptor.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -81,8 +82,23 @@ int main()
     const auto feed = Feed::load(feedDir, bbox);
     std::cout << "Loaded feed with " << feed.trips.size() << " trips.\n";
 
+    enum class Router { CSA, RAPTOR };
+    Router currentRouter = Router::RAPTOR;
+
     std::vector<Connection> connections;
     std::optional<RealtimeOverlays> rtOverlays;
+    std::optional<RaptorData> raptorData;
+
+    // Builds RaptorData from the feed (and current realtime overlays) if not yet built.
+    auto buildRaptorDataIfNeeded = [&]()
+    {
+        if (!raptorData)
+        {
+            std::cout << "Building RAPTOR data...\n";
+            raptorData = buildRaptorData(feed, rtOverlays ? &*rtOverlays : nullptr);
+            std::cout << "RAPTOR data built.\n";
+        }
+    };
 
     // Re-parses the realtime .pb and rebuilds connections from the static feed.
     auto reloadRealtime = [&]()
@@ -95,6 +111,9 @@ int main()
                   << " area trips covered (" << overlays.size() << " total in feed).\n";
         connections = buildConnections(feed, fromDate, toDate, &overlays);
         rtOverlays = std::move(overlays);
+        raptorData = std::nullopt;
+        if (currentRouter == Router::RAPTOR)
+            buildRaptorDataIfNeeded();
         std::cout << "Rebuilt " << connections.size() << " connections.\n";
     };
 
@@ -172,11 +191,12 @@ int main()
 
     std::cout << "Using " << connections.size() << " connections.\n";
     std::cout << "Number of unique stops in connections: " << countUniqueStops(connections) << "\n";
+    buildRaptorDataIfNeeded();
 
     while (true)
     {
         std::string fromStopName, toStopName;
-        std::cout << "\nEnter origin stop ('reload' to refresh realtime, empty to quit): ";
+        std::cout << "\nEnter origin stop ('reload' to refresh realtime, 'raptor'/'csa' to switch router, empty to quit): ";
         std::getline(std::cin, fromStopName);
         if (fromStopName.empty())
             break;
@@ -190,6 +210,21 @@ int main()
                 reloadRealtime();
                 printEnRouteStats();
             }
+            continue;
+        }
+
+        if (fromStopName == "raptor")
+        {
+            buildRaptorDataIfNeeded();
+            currentRouter = Router::RAPTOR;
+            std::cout << "Switched to RAPTOR.\n";
+            continue;
+        }
+
+        if (fromStopName == "csa")
+        {
+            currentRouter = Router::CSA;
+            std::cout << "Switched to CSA.\n";
             continue;
         }
 
@@ -230,11 +265,26 @@ int main()
 
         std::cout << "Finding route from " << feed.stopName(fromStop)
                   << " to " << feed.stopName(toStop)
-                  << " departing at current time.\n";
+                  << " departing at current time"
+                  << " [" << (currentRouter == Router::RAPTOR ? "rRAPTOR" : "CSA") << "].\n";
 
-        const RouteResult &result = getRoute(fromStop, toStop, departureTime,
-                                             connections, feed,
-                                             rtOverlays ? &*rtOverlays : nullptr);
-        printRoute(result, feed);
+        if (currentRouter == Router::RAPTOR)
+        {
+            buildRaptorDataIfNeeded();
+            const Time relDeparture = departureTime - midnight;
+            constexpr Time kSearchWindowSeconds = 2 * 3600;
+            const std::vector<RouteResult> results = rangeRaptor(fromStop, toStop, relDeparture, relDeparture + kSearchWindowSeconds,
+                                                                  midnight, *raptorData, feed,
+                                                                  rtOverlays ? &*rtOverlays : nullptr);
+            for (const RouteResult &result : results)
+                printRoute(result, feed);
+        }
+        else
+        {
+            const RouteResult result = getRoute(fromStop, toStop, departureTime,
+                                                connections, feed,
+                                                rtOverlays ? &*rtOverlays : nullptr);
+            printRoute(result, feed);
+        }
     }
 }

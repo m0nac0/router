@@ -13,6 +13,7 @@ add_executable(router
     routing/connections.cpp
     routing/csa.cpp
     routing/journey.cpp
+    routing/raptor.cpp
     realtime/realtime.cpp
     realtime/build/gen/gtfs-realtime.pb.cc
 )

@@ -11,9 +11,6 @@ AbsTime midnightUnix(std::chrono::year_month_day ymd)
     return static_cast<AbsTime>(dp.time_since_epoch().count() * 86400u);
 }
 
-namespace
-{
-
 std::unordered_map<ServiceId, std::set<CalendarEntry>> buildServiceIndex(const Feed &feed)
 {
     std::unordered_map<ServiceId, std::set<CalendarEntry>> index;
@@ -62,7 +59,7 @@ bool isServiceActive(const std::unordered_map<ServiceId, std::set<CalendarEntry>
     return false;
 }
 
-} // namespace
+
 
 std::vector<Connection> buildConnections(const Feed &feed,
                                          std::chrono::year_month_day fromDate,
